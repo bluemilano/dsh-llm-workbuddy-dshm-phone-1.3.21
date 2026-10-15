@@ -1,5 +1,7 @@
 # DSH WorkBuddy Provider
 
+这是临时改写的用于DSHM鸿蒙手机版本安装插件的临时调试文件,便于安装,近期删除 
+
 为 DeepSeek Harness（DSH）增加 `WorkBuddy 中国区` Provider。插件通过
 WorkBuddy 提供的 API Key，或 WorkBuddy 中国站的网页登录令牌调用模型，并在
 DSH WebUI 中管理模型和认证方式。
