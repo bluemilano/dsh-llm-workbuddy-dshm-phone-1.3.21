@@ -1,0 +1,1445 @@
+window.__ModuleLoader__.load({
+  id: "@axiaohungry/dsh-llm-workbuddy",
+  factory: (require) => {
+    const ROUTE = "/dsh-llm-workbuddy/auth";
+    const MARKER = "data-workbuddy-auth-switch";
+    const AUTH_STATE_EVENT = "dsh-llm-workbuddy:auth-state";
+    const PENDING_MARKER = "data-workbuddy-new-session-selector";
+    const WORKBUDDY_PROVIDER_PATTERN = /(?:^|-)(?:work-?buddy|code-?buddy)(?:-|$)/;
+    const React = require("react");
+    const { createElement, useEffect, useRef, useState } = React;
+
+    function isWorkBuddyProvider(value) {
+      const normalized = String(value ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      return normalized.length > 0 && WORKBUDDY_PROVIDER_PATTERN.test(normalized);
+    }
+
+    function isModLensWorkBuddyProvider(value) {
+      const normalized = String(value ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      return /^modlens-(?:work-?buddy|code-?buddy)(?:-|$)/.test(normalized);
+    }
+
+    function button(text) {
+      const element = document.createElement("button");
+      element.type = "button";
+      element.textContent = text;
+      Object.assign(element.style, {
+        minHeight: "44px",
+        padding: "0 12px",
+        border: "1px solid var(--dsw-border-subtle, #d0d5dd)",
+        borderRadius: "8px",
+        background: "var(--dsw-surface-subtle, transparent)",
+        color: "inherit",
+        cursor: "pointer",
+        whiteSpace: "nowrap",
+        boxSizing: "border-box",
+        font: "inherit",
+        fontSize: "13px",
+        fontWeight: "500",
+        transition: "background-color 120ms ease, border-color 120ms ease, opacity 120ms ease",
+      });
+      return element;
+    }
+
+    function accountPicker() {
+      const element = document.createElement("select");
+      element.setAttribute("aria-label", "WorkBuddy 令牌账号");
+      Object.assign(element.style, {
+        minHeight: "44px",
+        minWidth: "180px",
+        maxWidth: "260px",
+        flex: "1 1 220px",
+        boxSizing: "border-box",
+        padding: "0 10px",
+        border: "1px solid var(--dsw-border-subtle, #d0d5dd)",
+        borderRadius: "8px",
+        background: "var(--dsw-surface-subtle, transparent)",
+        color: "inherit",
+        font: "inherit",
+        fontSize: "13px",
+      });
+      return element;
+    }
+
+    function textInput(type, placeholder, ariaLabel) {
+      const element = document.createElement("input");
+      element.type = type;
+      element.placeholder = placeholder;
+      element.setAttribute("aria-label", ariaLabel);
+      element.autocomplete = type === "password" ? "new-password" : "off";
+      Object.assign(element.style, {
+        minHeight: "44px",
+        minWidth: "0",
+        flex: "1 1 200px",
+        boxSizing: "border-box",
+        padding: "0 12px",
+        border: "1px solid var(--dsw-border-subtle, #d0d5dd)",
+        borderRadius: "8px",
+        background: "var(--dsw-surface-subtle, transparent)",
+        color: "inherit",
+        font: "inherit",
+        fontSize: "13px",
+      });
+      return element;
+    }
+
+    function fieldLabel(text) {
+      const element = document.createElement("span");
+      element.textContent = text;
+      Object.assign(element.style, {
+        flex: "0 0 auto",
+        minWidth: "92px",
+        fontSize: "13px",
+        lineHeight: "20px",
+        color: "var(--dsw-text-secondary, #667085)",
+      });
+      return element;
+    }
+
+    function row() {
+      const element = document.createElement("div");
+      Object.assign(element.style, {
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+        flexWrap: "wrap",
+        width: "100%",
+      });
+      return element;
+    }
+
+    function section() {
+      const element = document.createElement("div");
+      Object.assign(element.style, {
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px",
+        width: "100%",
+        boxSizing: "border-box",
+        padding: "10px 12px",
+        border: "1px solid var(--dsw-border-subtle, #d0d5dd)",
+        borderRadius: "10px",
+        background: "var(--dsw-surface-subtle, rgba(0, 0, 0, 0.02))",
+      });
+      return element;
+    }
+
+    function setVisible(element, visible, display = "flex") {
+      element.hidden = !visible;
+      element.style.setProperty("display", visible ? display : "none", "important");
+    }
+
+    /*
+     * 登录链接的显示决策（纯函数，便于离线断言）。
+     *
+     * 背景：后端 openBrowser 在禁止创建进程的档位（鸿蒙手机/平板）必然失败，
+     * 唯一通路是把设备流 authUrl 交给用户。这里决定三件事：
+     *   show          —— 是否显示链接
+     *   needsCopyHint —— 是否额外给出"可复制地址"文本（后端没唤起浏览器时才需要）
+     *   label         —— 链接文案
+     * 只看后端字段，不看平台（平台差异已由 browserOpened 表达）。
+     */
+    function loginLinkPlan(status) {
+      const url = typeof status?.loginAuthUrl === "string" && status.loginAuthUrl.length > 0 ? status.loginAuthUrl : null;
+      const pending = status?.loginPending === true;
+      const token = status?.mode === "token";
+      const opened = status?.loginBrowserOpened === true;
+      const show = url !== null && (token || pending);
+      return {
+        show,
+        url,
+        needsCopyHint: show && !opened,
+        label: opened ? "重新打开登录页" : "打开登录页",
+      };
+    }
+
+    function isWorkBuddy(input) {
+      const editor = input.parentElement?.parentElement;
+      if (!editor) return false;
+      if (isWorkBuddyProvider(editor.textContent)) return true;
+      const provider = editor.parentElement?.querySelector('select[aria-label="提供方"]')?.value;
+      return isWorkBuddyProvider(provider);
+    }
+
+    function accountText(account) {
+      const label = account?.accountName || account?.label || account?.account?.displayName || account?.account?.email || account?.account?.userId || "未命名账号";
+      const userId = account?.userId || account?.account?.userId;
+      return userId && userId !== label ? `${label} · ${String(userId).slice(0, 8)}` : label;
+    }
+
+    function accountLabel(account) {
+      return account?.accountName || account?.label || account?.account?.displayName || account?.account?.email || account?.account?.userId || "未命名账号";
+    }
+
+    function apiKeyText(key) {
+      const label = key?.label || (key?.kind === "environment" ? `环境变量 ${key.ref}` : "DSH 保存的 API Key");
+      const suffix = key?.masked ? ` · ${key.masked}` : "";
+      return key?.configured === false ? `${label}（不可用）` : `${label}${suffix}`;
+    }
+
+    function apiKeyLabel(key) {
+      return key?.label || (key?.kind === "environment" ? `环境变量 ${key.ref}` : "DSH 保存的 API Key");
+    }
+
+    function formatCredits(value) {
+      const number = Number(value);
+      return Number.isFinite(number) ? number.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) : "—";
+    }
+
+    async function authRequest(path, body, sessionId) {
+      const options = {
+        method: body === undefined ? "GET" : "POST",
+        cache: "no-store",
+      };
+      if (body !== undefined) {
+        options.headers = { "content-type": "application/json" };
+        options.body = JSON.stringify({ ...body, ...(sessionId && body.sessionId === undefined ? { sessionId: String(sessionId) } : {}) });
+      }
+      const query = sessionId && body === undefined ? `?sessionId=${encodeURIComponent(String(sessionId))}` : "";
+      const response = await fetch(`${ROUTE}/${path}${query}`, options);
+      const text = await response.text();
+      let result = {};
+      try {
+        result = text ? JSON.parse(text) : {};
+      } catch {
+        result = {};
+      }
+      if (!response.ok || result.ok === false) {
+        const error = new Error(result.message || `请求失败（${response.status}）`);
+        error.status = response.status;
+        throw error;
+      }
+      return result;
+    }
+
+    function notifyAuthState() {
+      if (typeof window !== "undefined") window.dispatchEvent(new Event(AUTH_STATE_EVENT));
+      if (typeof document !== "undefined") {
+        for (const panel of document.querySelectorAll(`[${PENDING_MARKER}]`)) {
+          delete panel.dataset.loaded;
+          mountPendingSelector();
+        }
+      }
+    }
+
+    function selectedProvider(selection) {
+      return selection?.next?.provider ?? selection?.lastUsed?.provider ?? selection?.provider;
+    }
+
+    function pendingCredentialOptions(status, mode) {
+      return mode === "token"
+        ? (Array.isArray(status.accounts) ? status.accounts : []).map((account) => ({ id: account.id, label: accountText(account) }))
+        : (Array.isArray(status.apiKeys) ? status.apiKeys : []).map((key) => ({ id: key.id, label: apiKeyText(key), disabled: key.configured === false }));
+    }
+
+    function createPendingSelector() {
+      const panel = document.createElement("div");
+      panel.setAttribute(PENDING_MARKER, "");
+      panel.setAttribute("role", "group");
+      panel.setAttribute("aria-label", "WorkBuddy 新会话凭证");
+      Object.assign(panel.style, {
+        boxSizing: "border-box",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "flex-end",
+        flexWrap: "wrap",
+        gap: "6px",
+        width: "100%",
+        maxWidth: "var(--dsh-composer-card-max-width, 720px)",
+        margin: "0 auto 8px",
+        padding: "0 8px",
+        color: "var(--dsw-text-tertiary, #98a2b3)",
+        fontSize: "12px",
+        lineHeight: "20px",
+      });
+      const label = document.createElement("span");
+      label.textContent = "新会话默认凭证";
+      const mode = document.createElement("select");
+      mode.setAttribute("aria-label", "新会话认证模式");
+      const credential = document.createElement("select");
+      credential.setAttribute("aria-label", "新会话 WorkBuddy 凭证");
+      for (const element of [mode, credential]) Object.assign(element.style, {
+        boxSizing: "border-box",
+        minWidth: "0",
+        maxWidth: "min(240px, 100%)",
+        height: "28px",
+        padding: "0 6px",
+        border: "1px solid var(--dsw-border-subtle, #d0d5dd)",
+        borderRadius: "7px",
+        background: "var(--dsw-surface-subtle, transparent)",
+        color: "inherit",
+        font: "inherit",
+        fontSize: "12px",
+      });
+      const hint = document.createElement("span");
+      hint.textContent = "发送时自动绑定所选凭证";
+      hint.style.color = "var(--dsw-text-tertiary, #98a2b3)";
+      panel.append(label, mode, credential, hint);
+      panel._workbuddyMode = mode;
+      panel._workbuddyCredential = credential;
+      panel._workbuddyHint = hint;
+      const apply = async () => {
+        if (panel.dataset.busy === "1") return;
+        const value = credential.value;
+        if (!value || credential.selectedOptions[0]?.disabled) return;
+        panel.dataset.busy = "1";
+        mode.disabled = true;
+        credential.disabled = true;
+        hint.textContent = "正在保存新会话默认凭证…";
+        try {
+          const next = mode.value === "token"
+            ? await authRequest("token", { accountId: value })
+            : await authRequest("api-key", { keyId: value });
+          renderPendingSelector(panel, next);
+          notifyAuthState();
+        } catch (error) {
+          hint.textContent = error instanceof Error ? error.message : "保存新会话凭证失败";
+          hint.style.color = "var(--dsw-text-danger, #c62828)";
+        } finally {
+          delete panel.dataset.busy;
+          mode.disabled = false;
+          credential.disabled = false;
+        }
+      };
+      mode.addEventListener("change", () => {
+        renderPendingOptions(panel, panel._workbuddyStatus, mode.value);
+        void apply();
+      });
+      credential.addEventListener("change", () => void apply());
+      return panel;
+    }
+
+    function renderPendingOptions(panel, status, preferredMode) {
+      if (!status) return;
+      const tokenOptions = pendingCredentialOptions(status, "token");
+      const apiOptions = pendingCredentialOptions(status, "api-key");
+      const tokenAvailable = tokenOptions.length > 0;
+      const apiAvailable = apiOptions.some((option) => !option.disabled);
+      if (!status.routingEnabled || (!tokenAvailable && !apiAvailable)) {
+        panel.hidden = true;
+        panel.style.setProperty("display", "none", "important");
+        return;
+      }
+      panel.hidden = false;
+      panel.style.setProperty("display", "flex", "important");
+      const suggestedMode = status.suggestedBinding?.mode;
+      const modeAvailable = (value) => value === "token" ? tokenAvailable : value === "api-key" && apiAvailable;
+      const mode = modeAvailable(preferredMode)
+        ? preferredMode
+        : modeAvailable(suggestedMode)
+          ? suggestedMode
+          : status.mode === "token" && tokenAvailable ? "token" : "api-key";
+      const modeSelect = panel._workbuddyMode;
+      const credentialSelect = panel._workbuddyCredential;
+      modeSelect.replaceChildren();
+      for (const [value, label, disabled] of [["token", "令牌", !tokenAvailable], ["api-key", "API Key", !apiAvailable]]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        option.disabled = disabled;
+        modeSelect.append(option);
+      }
+      modeSelect.value = mode;
+      const options = mode === "token" ? tokenOptions : apiOptions;
+      credentialSelect.replaceChildren(...options.map((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.id;
+        option.textContent = entry.label;
+        option.disabled = entry.disabled === true;
+        return option;
+      }));
+      const activeId = mode === "token"
+        ? status.suggestedAccountId ?? status.activeAccountId
+        : status.suggestedApiKeyId ?? status.activeApiKeyId;
+      if (activeId && options.some((entry) => entry.id === activeId && !entry.disabled)) credentialSelect.value = activeId;
+      panel._workbuddyHint.textContent = "发送时自动绑定所选凭证";
+      panel._workbuddyHint.style.color = "var(--dsw-text-tertiary, #98a2b3)";
+    }
+
+    function renderPendingSelector(panel, status) {
+      panel._workbuddyStatus = status;
+      renderPendingOptions(panel, status, panel._workbuddyMode.value);
+    }
+
+    function mountPendingSelector() {
+      if (typeof document === "undefined") return;
+      const seats = Array.from(document.querySelectorAll("[data-composer-seat]"));
+      const seat = seats.find((candidate) => candidate.closest('[data-phase="hero"]'));
+      const panels = Array.from(document.querySelectorAll(`[${PENDING_MARKER}]`));
+      if (!seat) {
+        for (const panel of panels) panel.remove();
+        return;
+      }
+      for (const panel of panels) {
+        if (panel.parentElement !== seat) panel.remove();
+      }
+      const panel = seat.querySelector(`[${PENDING_MARKER}]`) ?? createPendingSelector();
+      if (!panel.parentElement) seat.append(panel);
+      if (panel.dataset.loading === "1" || panel.dataset.loaded === "1") return;
+      panel.dataset.loading = "1";
+      authRequest("status")
+        .then((status) => {
+          panel.dataset.loaded = "1";
+          renderPendingSelector(panel, status);
+        })
+        .catch(() => {
+          panel.hidden = true;
+          panel.style.setProperty("display", "none", "important");
+        })
+        .finally(() => {
+          delete panel.dataset.loading;
+        });
+    }
+
+    function WorkBuddyCreditsDock({ useProjection, sessionId }) {
+      let selection;
+      try {
+        selection = typeof useProjection === "function" ? useProjection("modelSelection") : undefined;
+      } catch {
+        selection = undefined;
+      }
+      const provider = selectedProvider(selection);
+      const selected = isWorkBuddyProvider(provider);
+      const modlens = isModLensWorkBuddyProvider(provider);
+      const [state, setState] = useState(null);
+
+      useEffect(() => {
+        let disposed = false;
+        let requestId = 0;
+        const load = async () => {
+          const currentRequestId = ++requestId;
+          if (!selected) {
+            setState(null);
+            return;
+          }
+          setState({ mode: "token", creditLoading: true, credits: undefined, todayUsage: null, creditError: null, todayUsageError: null });
+          let status;
+          try {
+            status = await authRequest("status", undefined, sessionId);
+          } catch {
+            if (!disposed && currentRequestId === requestId) setState(null);
+            return;
+          }
+          if (disposed || currentRequestId !== requestId) return;
+          if (status.mode !== "token" || !status.activeAccountId) {
+            setState({ ...status, creditLoading: false });
+            return;
+          }
+          try {
+            const result = await authRequest("credits", { accountId: status.activeAccountId }, sessionId);
+            if (!disposed && currentRequestId === requestId) setState({ ...status, ...result, creditLoading: false });
+          } catch (error) {
+            if (!disposed && currentRequestId === requestId) {
+              const message = error instanceof Error ? error.message : "查询 WorkBuddy 积分失败";
+              setState({
+                ...status,
+                credits: null,
+                creditLoading: false,
+                creditError: message,
+                todayUsage: null,
+                todayUsageError: "查询 WorkBuddy 今日请求量失败",
+              });
+            }
+          }
+        };
+        load();
+        const onAuthState = () => load();
+        window.addEventListener(AUTH_STATE_EVENT, onAuthState);
+        const timer = window.setInterval(load, 60_000);
+        return () => {
+          disposed = true;
+          window.removeEventListener(AUTH_STATE_EVENT, onAuthState);
+          window.clearInterval(timer);
+        };
+      }, [provider, selected, sessionId]);
+
+      const hasTokenAccount = state?.mode === "token" && Boolean(state.activeAccountId);
+      if (!selected || !state || (!state.routingEnabled && state.mode !== "token") || (!state.routingEnabled && state.mode === "token" && !state.activeAccountId) || (!sessionId && !hasTokenAccount)) return null;
+      const creditsText = state.creditLoading
+        ? "剩余积分：读取中…"
+        : state.unlimited
+          ? "剩余积分：不限量"
+          : typeof state.credits === "number" && Number.isFinite(state.credits)
+            ? `剩余积分：${formatCredits(state.credits)}`
+            : state.creditError
+              ? "剩余积分：暂不可用"
+              : "剩余积分：—";
+      const today = state.todayUsage;
+      const usageText = today?.synced === true
+        ? `今日请求：${Number.isFinite(Number(today.count)) ? Number(today.count) : 0} 次 · 用量 ${formatCredits(today.used)} 积分`
+        : state.creditLoading
+          ? "今日请求：读取中…"
+          : state.todayUsageError
+            ? "今日请求：暂不可用"
+            : "今日请求：—";
+      const modlensHint = modlens ? createElement("span", {
+        "data-workbuddy-modlens-hint": true,
+        title: "ModLens 会先处理会话中的历史图片，首次响应可能较慢；若超时、无响应或返回 429，请检查视觉引擎登录、网络和额度。纯文本任务可切换 WorkBuddy 直连。",
+        style: {
+          flex: "1 1 100%",
+          minWidth: 0,
+          color: "var(--dsw-text-tertiary, #98a2b3)",
+          fontSize: "11px",
+          lineHeight: "16px",
+          textAlign: "right",
+        },
+      }, "ModLens：历史图片会先处理，响应较慢或出现 429 时请检查视觉引擎与额度；纯文本可切换 WorkBuddy 直连") : null;
+      const activeAccount = Array.isArray(state.accounts) ? state.accounts.find((account) => account.id === state.activeAccountId) : undefined;
+      const credentialOptions = state.mode === "token"
+        ? (Array.isArray(state.accounts) ? state.accounts.map((account) => createElement("option", { key: account.id, value: account.id }, accountText(account))) : [])
+        : (Array.isArray(state.apiKeys) ? state.apiKeys.map((key) => createElement("option", { key: key.id, value: key.id, disabled: key.configured === false }, apiKeyText(key))) : []);
+      const confirmBindingChange = (message) => typeof window === "undefined" || window.confirm(message);
+      const applyBindingResult = async (result) => {
+        setState(result);
+        if (result.mode === "token" && result.activeAccountId) {
+          try {
+            const credits = await authRequest("credits", { accountId: result.activeAccountId }, sessionId);
+            setState({ ...result, ...credits, creditLoading: false });
+          } catch (error) {
+            setState({
+              ...result,
+              credits: null,
+              creditLoading: false,
+              creditError: error instanceof Error ? error.message : "查询 WorkBuddy 积分失败",
+              todayUsage: null,
+              todayUsageError: "查询 WorkBuddy 今日请求量失败",
+            });
+          }
+        }
+      };
+      const bindCredential = async (mode, value, failureMessage) => {
+        try {
+          const result = mode === "token"
+            ? await authRequest("token", { accountId: value }, sessionId)
+            : await authRequest("api-key", { keyId: value }, sessionId);
+          await applyBindingResult(result);
+        } catch (error) {
+          setState({ ...state, creditError: error instanceof Error ? error.message : failureMessage });
+        }
+      };
+      const onSessionCredentialChange = async (event) => {
+        if (!state.routingEnabled || !sessionId) return;
+        const value = event.target.value;
+        if (!confirmBindingChange("切换后，当前已发出的请求继续使用原凭证；后续模型调用将使用新凭证。确定切换吗？")) {
+          event.target.value = state.mode === "token" ? state.activeAccountId ?? "" : state.activeApiKeyId ?? "";
+          return;
+        }
+        await bindCredential(state.mode, value, "切换会话凭证失败");
+      };
+      const onSessionModeChange = async (event) => {
+        if (!state.routingEnabled || !sessionId) return;
+        const mode = event.target.value;
+        const value = mode === "token" ? state.accounts?.[0]?.id : state.apiKeys?.find((key) => key.configured)?.id;
+        if (!value) return;
+        if (!confirmBindingChange("切换后，当前已发出的请求继续使用原凭证；后续模型调用将使用新凭证。确定切换认证模式吗？")) {
+          event.target.value = state.mode;
+          return;
+        }
+        await bindCredential(mode, value, "切换会话认证模式失败");
+      };
+      const onUnbind = async () => {
+        if (!state.routingEnabled || !sessionId || !state.sessionBinding) return;
+        if (!confirmBindingChange("解除后，当前会话将在下一次模型调用时绑定当前默认凭证。确定解除吗？")) return;
+        try {
+          await applyBindingResult(await authRequest("unbind", {}, sessionId));
+        } catch (error) {
+          setState({ ...state, creditError: error instanceof Error ? error.message : "解除会话凭证失败" });
+        }
+      };
+      const actionStyle = { border: "0", padding: "0 2px", background: "transparent", color: "inherit", font: "inherit", fontSize: "12px", cursor: "pointer", textDecoration: "underline" };
+      const sessionControls = state.routingEnabled && sessionId ? createElement(
+        "span",
+        { "data-workbuddy-session-controls": true, style: { display: "inline-flex", alignItems: "center", justifyContent: "flex-end", flex: "1 1 100%", flexWrap: "wrap", gap: "4px", minWidth: 0, maxWidth: "100%" } },
+        createElement("span", { title: state.sessionBinding ? "当前会话已使用独立凭证" : "当前会话未绑定，下次发送将固化当前默认凭证" }, state.sessionBinding ? "已绑定" : "未绑定"),
+        createElement("select", { value: state.mode, onChange: onSessionModeChange, "aria-label": "当前会话认证模式", style: { border: "0", background: "transparent", color: "inherit", font: "inherit", fontSize: "12px", minWidth: 0, maxWidth: "110px" } },
+          createElement("option", { value: "token" }, "令牌"),
+          createElement("option", { value: "api-key" }, "API Key"),
+        ),
+        createElement("select", { value: state.mode === "token" ? state.activeAccountId ?? "" : state.activeApiKeyId ?? "", onChange: onSessionCredentialChange, "aria-label": "当前会话凭证", style: { border: "0", background: "transparent", color: "inherit", font: "inherit", fontSize: "12px", minWidth: 0, maxWidth: "190px" } }, credentialOptions),
+        state.sessionBinding ? createElement("button", { type: "button", onClick: onUnbind, title: "解除当前绑定，下次发送时重新绑定默认凭证", style: actionStyle }, "解除绑定") : null,
+        createElement("span", { "aria-hidden": true, style: { opacity: 0.55, padding: "0 2px" } }, "·"),
+      ) : null;
+      return createElement(
+        "div",
+        {
+          className: "dsh-workbuddy-credits",
+          "data-workbuddy-credits": true,
+          "data-workbuddy-session-aware": state.routingEnabled ? true : undefined,
+          role: "status",
+          "aria-live": "polite",
+          title: [activeAccount ? `当前账号：${accountText(activeAccount)}` : "", state.creditError, state.todayUsageError].filter(Boolean).join("；") || undefined,
+          style: {
+            boxSizing: "border-box",
+            minWidth: 0,
+            width: "100%",
+            maxWidth: "100%",
+            minHeight: "20px",
+            padding: "0",
+            display: "inline-flex",
+            flexWrap: "wrap",
+            gap: "2px 8px",
+            flex: "0 1 auto",
+            justifyContent: "flex-end",
+            alignItems: "center",
+            color: "var(--dsw-text-tertiary, #98a2b3)",
+            fontSize: "12px",
+            lineHeight: "18px",
+            fontVariantNumeric: "tabular-nums",
+            whiteSpace: "normal",
+            overflow: "visible",
+            textOverflow: "clip",
+          },
+        },
+        sessionControls,
+        state.mode === "token" ? createElement("span", null, creditsText) : null,
+        state.mode === "token" ? createElement("span", { "aria-hidden": true, style: { opacity: 0.55, padding: "0 4px" } }, "·") : null,
+        state.mode === "token" ? createElement("span", null, usageText) : createElement("span", null, "当前会话 API Key"),
+        modlensHint,
+      );
+    }
+
+    function installComposerDockLayout() {
+      if (typeof document === "undefined" || document.querySelector('style[data-plugin-css="dsh-llm-workbuddy-composer-dock"]')) return;
+      const style = document.createElement("style");
+      style.dataset.plugin = "@axiaohungry/dsh-llm-workbuddy";
+      style.dataset.pluginCss = "dsh-llm-workbuddy-composer-dock";
+      style.textContent = `
+[data-slot="conversation.composer.dock"]:has(> [data-composer-stats]),
+[data-slot="conversation.composer.dock"]:has(> [data-workbuddy-credits]) {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 0 4px 4px;
+  overflow: hidden;
+}
+[data-slot="conversation.composer.dock"] > [data-composer-stats] {
+  grid-column: 2;
+  width: auto !important;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0 !important;
+}
+[data-slot="conversation.composer.dock"] > [data-workbuddy-credits] {
+  grid-column: 3;
+  justify-self: end;
+  width: 100% !important;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0 !important;
+}
+[data-slot="conversation.composer.dock"] > [data-workbuddy-credits] > span {
+  min-width: 0;
+}
+[data-slot="conversation.composer.dock"] > [data-workbuddy-credits] > [data-workbuddy-session-controls] {
+  flex-basis: 100%;
+  width: 100%;
+}
+@media (max-width: 760px) {
+  [data-slot="conversation.composer.dock"]:has(> [data-composer-stats]),
+  [data-slot="conversation.composer.dock"]:has(> [data-workbuddy-credits]) {
+    display: flex !important;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  [data-slot="conversation.composer.dock"] > [data-composer-stats],
+  [data-slot="conversation.composer.dock"] > [data-workbuddy-credits] {
+    flex: 0 1 auto;
+  }
+}
+`;
+      document.head.appendChild(style);
+    }
+
+    function applyCreditStatus(stats, status, activeAccount) {
+      const visible = status.mode === "token" && Boolean(activeAccount);
+      setVisible(stats, visible);
+      if (!visible) return;
+      const credit = stats.querySelector('[data-workbuddy-stat="credits"]');
+      const usage = stats.querySelector('[data-workbuddy-stat="usage"]');
+      credit.title = status.creditError || "";
+      usage.title = status.todayUsageError || "";
+      if (status.creditLoading) credit.textContent = "剩余积分：读取中…";
+      else if (status.unlimited) credit.textContent = "剩余积分：不限量";
+      else if (typeof status.credits === "number" && Number.isFinite(status.credits)) credit.textContent = `剩余积分：${formatCredits(status.credits)}`;
+      else credit.textContent = status.creditError ? "剩余积分：暂不可用" : "剩余积分：—";
+      const today = status.todayUsage;
+      if (today && today.synced === true) {
+        usage.textContent = `今日请求：${Number.isFinite(Number(today.count)) ? Number(today.count) : 0} 次 · 用量 ${formatCredits(today.used)} 积分`;
+      } else {
+        usage.textContent = status.creditLoading ? "今日请求：读取中…" : status.todayUsageError ? "今日请求：暂不可用" : "今日请求：—";
+      }
+    }
+
+    function applyMode(input, keyButton, tokenButton, keySection, keySourceRow, keySelect, keyHint, newKeyInput, newKeyLabelInput, saveKeyButton, removeKeyButton, tokenSection, accountRow, accountSelect, accountName, addButton, removeButton, accountStats, routingRow, routingToggle, message, status, loginLink, loginUrlText) {
+      const token = status.mode === "token";
+      const apiKeys = Array.isArray(status.apiKeys) ? status.apiKeys : [];
+      const activeApiKeyId = status.activeApiKeyId ?? apiKeys[0]?.id;
+      const activeApiKey = apiKeys.find((key) => key.id === activeApiKeyId);
+      const accounts = Array.isArray(status.accounts) ? status.accounts : [];
+      const activeAccountId = status.activeAccountId ?? accounts[0]?.id;
+      input.disabled = token;
+      input.placeholder = token ? "当前使用 WorkBuddy 账号令牌" : "输入新的 API Key（保存到 DSH）";
+      newKeyInput.disabled = token;
+      newKeyLabelInput.disabled = token;
+      keyButton.setAttribute("aria-pressed", String(!token));
+      tokenButton.setAttribute("aria-pressed", String(token));
+      keyButton.style.background = !token ? "var(--dsw-accent-subtle, #eef4ff)" : "var(--dsw-surface-subtle, transparent)";
+      tokenButton.style.background = token ? "var(--dsw-accent-subtle, #eef4ff)" : "var(--dsw-surface-subtle, transparent)";
+      setVisible(keySection, !token);
+      setVisible(keySourceRow, apiKeys.length > 0);
+      keySelect.replaceChildren(...apiKeys.map((key) => {
+        const option = document.createElement("option");
+        option.value = key.id;
+        option.textContent = apiKeyText(key);
+        option.title = apiKeyLabel(key);
+        return option;
+      }));
+      if (activeApiKeyId) keySelect.value = activeApiKeyId;
+      keyHint.textContent = token
+        ? ""
+        : activeApiKey ? `${status.apiKeyConfigured ? "当前来源" : "可选来源"}：${apiKeyText(activeApiKey)}` : "未检测到可用 API Key，可输入新 Key 保存";
+      keyHint.title = activeApiKey ? apiKeyLabel(activeApiKey) : "";
+      saveKeyButton.textContent = "添加并使用";
+      removeKeyButton.hidden = !activeApiKey || activeApiKey.kind !== "dsh";
+      setVisible(tokenSection, token);
+      tokenButton.textContent = token ? "令牌模式" : "令牌登录";
+      addButton.textContent = accounts.length ? "添加账号" : "登录 WorkBuddy";
+      setVisible(accountRow, token && accounts.length > 0);
+      accountSelect.replaceChildren(...accounts.map((account) => {
+        const option = document.createElement("option");
+        option.value = account.id;
+        option.textContent = accountText(account);
+        option.title = accountLabel(account);
+        return option;
+      }));
+      if (activeAccountId) accountSelect.value = activeAccountId;
+      const activeAccount = accounts.find((account) => account.id === activeAccountId);
+      accountName.textContent = activeAccount ? `当前账号：${accountText(activeAccount)}` : "";
+      accountName.title = activeAccount ? accountLabel(activeAccount) : "";
+      removeButton.hidden = !token || !activeAccount;
+      setVisible(accountStats, token && Boolean(activeAccount));
+      applyCreditStatus(accountStats, status, activeAccount);
+      routingToggle.checked = status.routingEnabled === true;
+      routingToggle.disabled = false;
+      routingRow.title = status.routingEnabled ? "已启用：每个会话可单独选择 WorkBuddy 账号或 API Key" : "关闭时使用原有的全局账号或 API Key";
+      /*
+       * 登录链接：只在令牌模式（或登录进行中）、且后端确实拿到了 authUrl 时出现。
+       * browserOpened === true 表示后端已唤起浏览器（桌面档），链接只作备用；
+       * === false 表示没唤起（受限档位），此时它就是唯一入口。
+       */
+      const plan = loginLinkPlan(status);
+      setVisible(loginLink, plan.show);
+      setVisible(loginUrlText, plan.show && plan.needsCopyHint);
+      if (plan.show) {
+        loginLink.href = plan.url;
+        loginLink.textContent = plan.label;
+        loginUrlText.textContent = plan.needsCopyHint
+          ? `若未自动打开，请复制此地址到浏览器：${plan.url}`
+          : "";
+      }
+      addButton.disabled = status.loginPending === true;
+      message.textContent = token
+        ? status.authenticated ? `令牌已登录：${activeAccount ? accountText(activeAccount) : "当前账号"}` : "令牌缺失，请重新登录"
+        : status.apiKeyConfigured ? `API Key 已就绪：${activeApiKey ? apiKeyText(activeApiKey) : "当前来源"}` : "未配置 API Key，请输入后保存";
+      message.style.color = token
+        ? status.authenticated ? "var(--dsw-text-success, #2e7d32)" : "var(--dsw-text-danger, #c62828)"
+        : status.apiKeyConfigured ? "var(--dsw-text-success, #2e7d32)" : "var(--dsw-text-danger, #c62828)";
+    }
+
+    async function request(path, body) {
+      const options = { method: "POST" };
+      if (body !== undefined) {
+        options.headers = { "content-type": "application/json" };
+        options.body = JSON.stringify(body);
+      }
+      const response = await fetch(`${ROUTE}/${path}`, options);
+      const result = await response.json();
+      if (!response.ok || !result.ok) {
+        const error = new Error(result.message || `请求失败（${response.status}）`);
+        error.status = response.status;
+        throw error;
+      }
+      return result;
+    }
+
+    function mount(input) {
+      const field = input.parentElement;
+      if (!field || field.querySelector(`[${MARKER}]`)) return;
+      field.setAttribute("data-workbuddy-auth-field", "");
+      input.dataset.workbuddyPlaceholder = input.placeholder;
+      for (const nativeNode of field.children) nativeNode.hidden = true;
+      Object.assign(field.style, { display: "block", width: "100%", boxSizing: "border-box" });
+      const controls = document.createElement("div");
+      controls.setAttribute(MARKER, "");
+      controls.setAttribute("role", "group");
+      controls.setAttribute("aria-label", "WorkBuddy 认证方式");
+      Object.assign(controls.style, {
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        gap: "8px",
+        width: "100%",
+        maxWidth: "100%",
+        paddingTop: "4px",
+        boxSizing: "border-box",
+        color: "var(--dsw-text-primary, inherit)",
+      });
+      const modeRow = row();
+      const keySection = section();
+      const keySourceRow = row();
+      const keyAddRow = row();
+      const tokenSection = section();
+      const accountRow = row();
+      const tokenActionRow = row();
+      const keyButton = button("API Key");
+      const tokenButton = button("令牌登录");
+      const keySelect = accountPicker();
+      keySelect.setAttribute("aria-label", "WorkBuddy API Key 来源");
+      const keySourceLabel = fieldLabel("当前 API Key");
+      const newKeyLabel = fieldLabel("新增 API Key");
+      const newKeyInput = textInput("password", "粘贴新的 API Key", "新增 WorkBuddy API Key");
+      const newKeyLabelInput = textInput("text", "名称（可选）", "API Key 名称");
+      const keyHint = document.createElement("span");
+      Object.assign(keyHint.style, {
+        display: "block",
+        width: "100%",
+        minWidth: "0",
+        overflowWrap: "anywhere",
+        whiteSpace: "normal",
+        fontSize: "12px",
+        lineHeight: "18px",
+        color: "var(--dsw-text-secondary, #667085)",
+      });
+      const saveKeyButton = button("添加并使用");
+      const removeKeyButton = button("删除");
+      const accountSelect = accountPicker();
+      const accountName = document.createElement("span");
+      Object.assign(accountName.style, {
+        flex: "1 1 220px",
+        minWidth: "0",
+        overflowWrap: "anywhere",
+        whiteSpace: "normal",
+        fontSize: "13px",
+        color: "var(--dsw-text-secondary, #667085)",
+      });
+      const addButton = button("令牌登录");
+      const removeButton = button("删除账号");
+      /*
+       * 受限平台（鸿蒙手机/平板禁止三方应用创建进程）上后端的 openBrowser 必然失败，
+       * 此时把设备流登录地址直接给用户：能 window.open 就打开，不能就显示成可复制
+       * 的地址。这条通路不依赖任何子进程。
+       */
+      const loginLink = document.createElement("a");
+      loginLink.setAttribute("data-workbuddy-login-link", "");
+      loginLink.target = "_blank";
+      loginLink.rel = "noopener noreferrer";
+      loginLink.textContent = "打开登录页";
+      Object.assign(loginLink.style, {
+        display: "none",
+        fontSize: "13px",
+        color: "var(--dsw-accent, #2563eb)",
+        textDecoration: "underline",
+        overflowWrap: "anywhere",
+        wordBreak: "break-all",
+        cursor: "pointer",
+      });
+      const loginUrlText = document.createElement("span");
+      loginUrlText.setAttribute("data-workbuddy-login-url", "");
+      Object.assign(loginUrlText.style, {
+        display: "none",
+        fontSize: "12px",
+        lineHeight: "18px",
+        color: "var(--dsw-text-secondary, #667085)",
+        userSelect: "all",
+        overflowWrap: "anywhere",
+        wordBreak: "break-all",
+      });
+      const accountLabel = fieldLabel("令牌账号");
+      const accountStats = document.createElement("div");
+      accountStats.setAttribute("role", "status");
+      accountStats.setAttribute("aria-live", "polite");
+      Object.assign(accountStats.style, {
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+        flexWrap: "wrap",
+        width: "100%",
+        minHeight: "24px",
+        fontSize: "13px",
+        color: "var(--dsw-text-secondary, #667085)",
+      });
+      const tokenHint = document.createElement("span");
+      tokenHint.textContent = "令牌登录后可切换账号，并查看积分与今日请求量。";
+      Object.assign(tokenHint.style, {
+        display: "block",
+        width: "100%",
+        fontSize: "12px",
+        lineHeight: "18px",
+        color: "var(--dsw-text-secondary, #667085)",
+      });
+      const creditStat = document.createElement("span");
+      creditStat.dataset.workbuddyStat = "credits";
+      const usageStat = document.createElement("span");
+      usageStat.dataset.workbuddyStat = "usage";
+      accountStats.append(creditStat, usageStat);
+      const routingRow = row();
+      const routingToggle = document.createElement("input");
+      routingToggle.type = "checkbox";
+      routingToggle.setAttribute("aria-label", "启用会话级账号/API Key");
+      routingToggle.style.accentColor = "var(--dsw-accent, #2563eb)";
+      const routingLabel = document.createElement("label");
+      routingLabel.textContent = "会话级账号/API Key";
+      routingLabel.style.fontSize = "13px";
+      routingLabel.style.color = "var(--dsw-text-secondary, #667085)";
+      const routingHint = document.createElement("span");
+      routingHint.textContent = "关闭时保持原有全局认证方式";
+      routingHint.style.fontSize = "12px";
+      routingHint.style.color = "var(--dsw-text-tertiary, #98a2b3)";
+      routingRow.append(routingToggle, routingLabel, routingHint);
+      const message = document.createElement("span");
+      message.setAttribute("role", "status");
+      message.setAttribute("aria-live", "polite");
+      Object.assign(message.style, { fontSize: "12px", minHeight: "18px", lineHeight: "18px" });
+      modeRow.append(keyButton, tokenButton);
+      keySourceRow.append(keySourceLabel, keySelect, removeKeyButton);
+      keyAddRow.append(newKeyLabel, newKeyInput, newKeyLabelInput, saveKeyButton);
+      keySection.append(keySourceRow, keyAddRow, keyHint);
+      accountRow.append(accountLabel, accountSelect, accountName, removeButton);
+      tokenActionRow.append(addButton, loginLink);
+      tokenSection.append(tokenHint, accountRow, accountStats, loginUrlText, tokenActionRow);
+      controls.append(modeRow, routingRow, keySection, tokenSection, message);
+      field.append(controls);
+      let current = { mode: "api-key", authenticated: false, accounts: [], apiKeys: [], credits: undefined, creditLoading: false, creditError: null, todayUsage: null, todayUsageError: null };
+      const render = (status) => {
+        const previousMode = current.mode;
+        const previousAccountId = current.activeAccountId;
+        const previousApiKeyId = current.activeApiKeyId;
+        const previousAccounts = current.accounts;
+        const previousApiKeys = current.apiKeys;
+        const previousRouting = current.routingEnabled;
+        current = { ...current, ...status };
+        applyMode(input, keyButton, tokenButton, keySection, keySourceRow, keySelect, keyHint, newKeyInput, newKeyLabelInput, saveKeyButton, removeKeyButton, tokenSection, accountRow, accountSelect, accountName, addButton, removeButton, accountStats, routingRow, routingToggle, message, current, loginLink, loginUrlText);
+        if (previousMode !== current.mode || previousAccountId !== current.activeAccountId || previousApiKeyId !== current.activeApiKeyId || previousAccounts !== current.accounts || previousApiKeys !== current.apiKeys || previousRouting !== current.routingEnabled) notifyAuthState();
+      };
+      render(current);
+      let creditRequestId = 0;
+      const loadCredits = async (accountId) => {
+        const requestId = ++creditRequestId;
+        if (current.mode !== "token" || !accountId) {
+          render({ credits: undefined, creditLoading: false, creditError: null, todayUsage: null, todayUsageError: null });
+          return;
+        }
+        render({ credits: undefined, creditLoading: true, creditError: null, todayUsage: null, todayUsageError: null });
+        try {
+          const result = await request("credits", { accountId });
+          if (requestId !== creditRequestId || current.activeAccountId !== accountId) return;
+          render({ ...result, creditLoading: false });
+        } catch (error) {
+          if (requestId !== creditRequestId || current.activeAccountId !== accountId) return;
+          render({ credits: null, creditLoading: false, creditError: error instanceof Error ? error.message : "查询 WorkBuddy 积分失败", todayUsage: null, todayUsageError: "查询 WorkBuddy 今日请求量失败" });
+        }
+      };
+
+      const setBusy = (busy) => {
+        keyButton.disabled = busy;
+        tokenButton.disabled = busy;
+        keySelect.disabled = busy;
+        newKeyInput.disabled = busy || current.mode === "token";
+        newKeyLabelInput.disabled = busy || current.mode === "token";
+        saveKeyButton.disabled = busy;
+        removeKeyButton.disabled = busy;
+        accountSelect.disabled = busy;
+        addButton.disabled = busy;
+        removeButton.disabled = busy;
+        routingToggle.disabled = busy;
+        keyButton.style.cursor = busy ? "progress" : "pointer";
+        tokenButton.style.cursor = busy ? "progress" : "pointer";
+        saveKeyButton.style.cursor = busy ? "progress" : "pointer";
+        removeKeyButton.style.cursor = busy ? "progress" : "pointer";
+        addButton.style.cursor = busy ? "progress" : "pointer";
+        removeButton.style.cursor = busy ? "progress" : "pointer";
+      };
+      keyButton.addEventListener("click", async () => {
+        setBusy(true);
+        message.textContent = "正在切换…";
+        try {
+          render(await request("api-key", current.activeApiKeyId ? { keyId: current.activeApiKeyId } : undefined));
+          newKeyInput.focus();
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : "切换失败";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+        } finally {
+          setBusy(false);
+        }
+      });
+      keySelect.addEventListener("change", async () => {
+        setBusy(true);
+        message.textContent = "正在切换 API Key…";
+        try {
+          render(await request("api-key", { keyId: keySelect.value }));
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : "切换失败";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+        } finally {
+          setBusy(false);
+        }
+      });
+      saveKeyButton.addEventListener("click", async () => {
+        const value = newKeyInput.value.trim();
+        if (!value) {
+          message.textContent = "请输入新的 API Key";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+          newKeyInput.focus();
+          return;
+        }
+        setBusy(true);
+        saveKeyButton.textContent = "添加中…";
+        message.textContent = "正在保存 API Key…";
+        try {
+          const label = newKeyLabelInput.value.trim();
+          const next = await request("api-key/add", { key: value, ...(label ? { label } : {}) });
+          newKeyInput.value = "";
+          newKeyLabelInput.value = "";
+          render(next);
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : "保存失败";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+        } finally {
+          setBusy(false);
+        }
+      });
+      newKeyInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !saveKeyButton.disabled) {
+          event.preventDefault();
+          saveKeyButton.click();
+        }
+      });
+      removeKeyButton.addEventListener("click", async () => {
+        if (!current.activeApiKeyId || !window.confirm("确定删除当前 DSH 保存的 API Key 吗？")) return;
+        setBusy(true);
+        message.textContent = "正在删除 API Key…";
+        try {
+          render(await request("api-key/remove", { keyId: current.activeApiKeyId }));
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : "删除失败";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+        } finally {
+          setBusy(false);
+        }
+      });
+      /*
+       * 发起登录并跟踪到完成。
+       *
+       * 与旧行为的差别：旧代码 await request("login") 会**阻塞到登录完成**
+       * （设备流最长 10 分钟），期间界面无反馈、也拿不到 authUrl；在禁止创建
+       * 进程的档位上后端唤起浏览器必然失败，用户于是「点了没反应」。
+       * 现在后端立即返回 authUrl，这里负责：显示/打开链接，然后轮询 /status
+       * 直到 authenticated 或后端不再 pending。
+       */
+      const startLogin = async () => {
+        setBusy(true);
+        addButton.textContent = "等待登录…";
+        message.style.color = "";
+        message.textContent = "正在创建 WorkBuddy 登录会话…";
+        try {
+          const started = await request("login");
+          render(started);
+          const authUrl = typeof started.authUrl === "string" && started.authUrl.length > 0 ? started.authUrl : null;
+          if (authUrl !== null && started.browserOpened !== true) {
+            // 后端没唤起浏览器（受限档位）：自己开。window.open 失败也不影响下面的轮询，
+            // 因为界面上已经显示了可复制的地址。
+            try {
+              window.open(authUrl, "_blank", "noopener");
+            } catch {
+              // 忽略：链接已显示，用户可手动打开
+            }
+            message.textContent = "请在打开的页面完成 WorkBuddy 登录；若没有自动打开，请复制下方地址到浏览器。";
+          } else if (authUrl !== null) {
+            message.textContent = "请在浏览器中完成 WorkBuddy 中国站登录…";
+          } else {
+            message.textContent = "正在等待 WorkBuddy 返回登录地址…";
+          }
+          // 轮询：2 秒一次，最多 5 分钟（设备流后端自己 10 分钟超时，这里只是别无限转）
+          for (let attempt = 0; attempt < 150; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 2_000));
+            let next;
+            try {
+              // 用 authRequest（GET，与设置面板首次读取状态同一通路），不是 mount 的 POST helper
+              next = await authRequest("status");
+            } catch {
+              continue; // 后端重启等瞬时错误：继续轮询
+            }
+            render(next);
+            if (next.loginError) {
+              message.textContent = next.loginError;
+              message.style.color = "var(--dsw-text-danger, #c62828)";
+              return;
+            }
+            if (next.authenticated && next.loginPending !== true) {
+              message.textContent = `已登录：${next.accounts?.length ? accountText(next.accounts.find((a) => a.id === next.activeAccountId) ?? next.accounts[0]) : "当前账号"}`;
+              message.style.color = "var(--dsw-text-success, #2e7d32)";
+              await loadCredits(next.activeAccountId);
+              return;
+            }
+            if (next.loginPending !== true) {
+              // 后端不再 pending 但也没 authenticated：登录流程结束但没拿到账号
+              message.textContent = next.authenticated ? "登录状态已更新" : "登录未完成，请重试";
+              await loadCredits(next.activeAccountId);
+              return;
+            }
+          }
+          message.textContent = "登录等待超时，请重新点击登录";
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : "登录失败";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+        } finally {
+          setBusy(false);
+        }
+      };
+      tokenButton.addEventListener("click", async () => {
+        if (current.accounts?.length) {
+          // 已有账号：这个按钮是「切到令牌模式」，不是登录
+          setBusy(true);
+          tokenButton.textContent = "切换中…";
+          message.textContent = "正在切换令牌账号…";
+          try {
+            const next = await request("token");
+            render(next);
+            await loadCredits(next.activeAccountId);
+          } catch (error) {
+            message.textContent = error instanceof Error ? error.message : "切换失败";
+            message.style.color = "var(--dsw-text-danger, #c62828)";
+          } finally {
+            setBusy(false);
+          }
+          return;
+        }
+        await startLogin();
+      });
+      addButton.addEventListener("click", startLogin);
+      accountSelect.addEventListener("change", async () => {
+        setBusy(true);
+        message.textContent = "正在切换令牌账号…";
+        try {
+          const next = await request("token", { accountId: accountSelect.value });
+          render(next);
+          await loadCredits(next.activeAccountId);
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : "切换失败";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+        } finally {
+          setBusy(false);
+        }
+      });
+      removeButton.addEventListener("click", async () => {
+        if (!current.activeAccountId || !window.confirm("确定删除这个 WorkBuddy 登录账号吗？令牌将从 DSH 凭据中移除。")) return;
+        setBusy(true);
+        message.textContent = "正在删除账号…";
+        try {
+          const next = await request("remove", { accountId: current.activeAccountId });
+          render(next);
+          await loadCredits(next.activeAccountId);
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : "删除失败";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+        } finally {
+          setBusy(false);
+        }
+      });
+      routingToggle.addEventListener("change", async () => {
+        setBusy(true);
+        message.textContent = routingToggle.checked ? "正在启用会话级认证…" : "正在关闭会话级认证…";
+        try {
+          render(await authRequest("routing", { enabled: routingToggle.checked }));
+        } catch (error) {
+          routingToggle.checked = !routingToggle.checked;
+          message.textContent = error instanceof Error ? error.message : "切换会话级认证失败";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+        } finally {
+          setBusy(false);
+        }
+      });
+      fetch(`${ROUTE}/status`, { cache: "no-store" })
+        .then((response) => response.json())
+        .then((status) => {
+          render(status);
+          return loadCredits(status.activeAccountId);
+        })
+        .catch(() => {
+          message.textContent = "认证状态读取失败";
+          message.style.color = "var(--dsw-text-danger, #c62828)";
+        });
+    }
+
+    function mountModelEditor(host) {
+      const heading = document.createElement("strong");
+      heading.textContent = "模型目录";
+      const actions = row();
+      const fetchButton = button("获取可用模型");
+      const addButton = button("添加模型");
+      const resetButton = button("恢复在线目录");
+      const saveButton = button("保存模型");
+      const list = document.createElement("div");
+      const candidates = document.createElement("div");
+      const message = document.createElement("span");
+      message.setAttribute("role", "status");
+      message.setAttribute("aria-live", "polite");
+      Object.assign(host.style, { display: "flex", flexDirection: "column", gap: "10px", width: "100%" });
+      Object.assign(list.style, { display: "flex", flexDirection: "column", gap: "8px" });
+      Object.assign(message.style, { fontSize: "12px", minHeight: "18px" });
+      actions.append(fetchButton, addButton, resetButton, saveButton);
+      host.append(heading, actions, list, candidates, message);
+      let models = null;
+      let revision;
+      let busy = false;
+      const invalidReasoning = new Set();
+      const say = (value, error = false) => {
+        message.textContent = value;
+        message.style.color = error ? "var(--dsw-text-danger, #c62828)" : "var(--dsw-text-secondary, #667085)";
+      };
+      const setBusy = (value) => {
+        busy = value;
+        for (const control of [fetchButton, addButton, resetButton, saveButton]) control.disabled = value;
+      };
+      const makeInput = (value, label, onChange, type = "text") => {
+        const input = textInput(type, label, label);
+        input.value = value ?? "";
+        input.title = label;
+        input.addEventListener("input", () => onChange(input.value));
+        return input;
+      };
+      const render = () => {
+        list.replaceChildren();
+        if (models === null) {
+          const hint = document.createElement("span");
+          hint.textContent = "使用当前账号的在线模型目录；获取后可选择模型进行自定义。";
+          list.append(hint);
+          return;
+        }
+        for (const [index, model] of models.entries()) {
+          const item = section();
+          const fields = row();
+          const id = makeInput(model.id, "模型 ID", (value) => { model.id = value.trim(); });
+          const name = makeInput(model.name, "显示名称", (value) => { model.name = value; });
+          const context = makeInput(model.contextWindow, "上下文窗口", (value) => {
+            if (value) model.contextWindow = Number(value);
+            else delete model.contextWindow;
+          }, "number");
+          const output = makeInput(model.maxTokens, "最大输出 Token", (value) => {
+            if (value) model.maxTokens = Number(value);
+            else delete model.maxTokens;
+          }, "number");
+          for (const input of [id, name, context, output]) {
+            input.style.flex = "1 1 140px";
+            fields.append(input);
+          }
+          const imageLabel = document.createElement("label");
+          const images = document.createElement("input");
+          images.type = "checkbox";
+          images.checked = model.input?.includes("image") === true;
+          images.addEventListener("change", () => { model.input = images.checked ? ["text", "image"] : ["text"]; });
+          imageLabel.append(images, " 图片输入");
+          const remove = button("删除");
+          remove.addEventListener("click", () => { invalidReasoning.delete(model); models.splice(index, 1); render(); });
+          fields.append(imageLabel, remove);
+          item.append(fields);
+          if (model.reasoningEfforts !== undefined) {
+            const thinking = document.createElement("details");
+            const summary = document.createElement("summary");
+            summary.textContent = "模型思考档位";
+            const editor = document.createElement("textarea");
+            editor.setAttribute("aria-label", `${model.id} 思考档位 JSON`);
+            editor.value = JSON.stringify(model.reasoningEfforts);
+            editor.style.width = "100%";
+            editor.addEventListener("change", () => {
+              try {
+                const value = JSON.parse(editor.value);
+                if (value !== false && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error();
+                model.reasoningEfforts = value;
+                invalidReasoning.delete(model);
+                say("");
+              } catch { invalidReasoning.add(model); say("思考档位 JSON 格式无效", true); }
+            });
+            thinking.append(summary, editor);
+            item.append(thinking);
+          }
+          list.append(item);
+        }
+      };
+      fetch(`${ROUTE}/models`, { cache: "no-store" })
+        .then((response) => response.json())
+        .then((state) => {
+          if (!state.ok) throw new Error(state.message);
+          models = state.models?.map((model) => ({ ...model })) ?? null;
+          revision = state.revision;
+          render();
+        })
+        .catch((error) => say(error instanceof Error ? error.message : "读取模型失败", true));
+      addButton.addEventListener("click", () => {
+        models ??= [];
+        models.push({ id: "", name: "" });
+        render();
+        list.lastElementChild?.querySelector('input[aria-label="模型 ID"]')?.focus();
+      });
+      fetchButton.addEventListener("click", async () => {
+        if (busy) return;
+        setBusy(true);
+        say("正在获取模型…");
+        try {
+          const result = await request("models", { action: "discover" });
+          candidates.replaceChildren();
+          const choices = result.models.filter((model) => !models?.some((existing) => existing.id === model.id));
+          if (!choices.length) return say("没有新的可用模型");
+          const selected = new Set();
+          for (const model of choices) {
+            const label = document.createElement("label");
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.addEventListener("change", () => checkbox.checked ? selected.add(model.id) : selected.delete(model.id));
+            label.append(checkbox, ` ${model.name || model.id} (${model.id})`);
+            Object.assign(label.style, { display: "block", fontSize: "13px" });
+            candidates.append(label);
+          }
+          const addSelected = button("添加选中模型");
+          addSelected.addEventListener("click", () => {
+            models ??= [];
+            models.push(...choices.filter((model) => selected.has(model.id)).map((model) => ({ ...model })));
+            candidates.replaceChildren();
+            render();
+          });
+          candidates.append(addSelected);
+          say(`获取到 ${result.models.length} 个模型，请选择后保存`);
+        } catch (error) { say(error instanceof Error ? error.message : "获取模型失败", true); }
+        finally { setBusy(false); }
+      });
+      saveButton.addEventListener("click", async () => {
+        if (busy || models === null) return;
+        if (invalidReasoning.size) return say("请先修正模型思考档位 JSON", true);
+        if (models.some((model) => !model.id || !Number.isSafeInteger(model.contextWindow ?? 1)
+          || !Number.isSafeInteger(model.maxTokens ?? 1))) return say("请检查模型 ID 和 Token 数值", true);
+        setBusy(true);
+        try {
+          const result = await request("models", { action: "save", models, revision });
+          revision = result.revision;
+          say("模型已保存");
+        } catch (error) { say(error instanceof Error ? error.message : "保存模型失败", true); }
+        finally { setBusy(false); }
+      });
+      resetButton.addEventListener("click", async () => {
+        if (busy || !window.confirm("恢复在线模型目录？自定义模型列表会被移除。")) return;
+        setBusy(true);
+        try {
+          const result = await request("models", { action: "reset", revision });
+          models = null;
+          revision = result.revision;
+          candidates.replaceChildren();
+          render();
+          say("已恢复在线模型目录");
+        } catch (error) { say(error instanceof Error ? error.message : "恢复失败", true); }
+        finally { setBusy(false); }
+      });
+      render();
+    }
+
+    function WorkBuddySettingsCard({ provider, embedded = false }) {
+      const root = useRef(null);
+      useEffect(() => {
+        if (provider?.provider !== "workbuddy-cn" || !root.current) return;
+        const host = root.current;
+        const field = section();
+        const input = document.createElement("input");
+        input.setAttribute("aria-label", "API 密钥");
+        field.append(input);
+        host.append(field);
+        mount(input);
+        const models = section();
+        host.append(models);
+        mountModelEditor(models);
+        const scope = embedded ? null : host.closest("li") ?? host.closest('[role="tabpanel"]') ?? host.closest('[class*="_addPanel"]');
+        const hidden = new Map();
+        const hideNative = () => {
+          if (!scope) return;
+          for (const node of scope.querySelectorAll('[class*="_editor"], [class*="_rowActions"]')) {
+            if (node.contains(host) || host.contains(node) || hidden.has(node)) continue;
+            hidden.set(node, {
+              hidden: node.hidden,
+              display: node.style.getPropertyValue("display"),
+              priority: node.style.getPropertyPriority("display"),
+            });
+            node.hidden = true;
+            node.style.setProperty("display", "none", "important");
+          }
+        };
+        const observer = scope ? new MutationObserver(hideNative) : undefined;
+        observer?.observe(scope, { childList: true, subtree: true });
+        hideNative();
+        return () => {
+          observer?.disconnect();
+          for (const [node, previous] of hidden) {
+            node.hidden = previous.hidden;
+            if (previous.display) node.style.setProperty("display", previous.display, previous.priority);
+            else node.style.removeProperty("display");
+          }
+        };
+      }, [provider?.provider]);
+      return provider?.provider === "workbuddy-cn"
+        ? createElement("div", { ref: root, "data-workbuddy-settings-card": "" })
+        : null;
+    }
+
+    function WorkBuddyPluginDetails({ subject }) {
+      return subject?.kind === "bundle" && subject.pkg?.name === "@axiaohungry/dsh-llm-workbuddy"
+        ? createElement(WorkBuddySettingsCard, { provider: { provider: "workbuddy-cn" }, embedded: true })
+        : null;
+    }
+
+    function enhance() {
+      for (const input of document.querySelectorAll('input[aria-label="API 密钥"]')) {
+        if (isWorkBuddy(input)) mount(input);
+      }
+      mountPendingSelector();
+    }
+
+    function apply(ctx) {
+      installComposerDockLayout();
+      ctx.slots.inject("settings.models.provider-card", () => ctx.slots.register({
+        name: "settings.models.provider-card",
+        key: "llm-workbuddy",
+      }, WorkBuddySettingsCard));
+      ctx.slots.inject("plugins.detail.section", () => ctx.slots.register({
+        name: "plugins.detail.section",
+        id: "llm-workbuddy",
+      }, WorkBuddyPluginDetails));
+      ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({
+        name: "conversation.composer.dock",
+        id: "workbuddy-credits",
+        order: 100,
+        label: "WorkBuddy 用量",
+      }, WorkBuddyCreditsDock));
+      ctx.effect(() => {
+        const observer = new MutationObserver(enhance);
+        observer.observe(document.body, { childList: true, subtree: true });
+        document.addEventListener("change", enhance, true);
+        enhance();
+        return () => {
+          observer.disconnect();
+          document.removeEventListener("change", enhance, true);
+        };
+      }, "llm-workbuddy: auth switch");
+    }
+
+    return { name: "dsh-llm-workbuddy-client", inject: ["slots"], apply };
+  },
+});
